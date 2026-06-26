@@ -1,0 +1,74 @@
+// WaterSimCompute.compute
+// 适用于PC的GPU稳定归一化浅水（波浪）求解器。
+// 状态纹理：RG浮点数 -> R = 高度，G = 速度。
+#pragma kernel Simulate
+#pragma kernel Splat
+
+RWTexture2D<float2> StateIn;
+RWTexture2D<float2> StateOut;
+
+int   _Res;
+float _Propagation; // 0.0.49（稳定波速；>0.49 发散 → 固定）
+float _Friction;      // 0..~0.05
+float _Damping;       // ~0.995..1.0
+float _UseMask;        // 循环 pool on/off
+float _MaskRadius;     // uv-space 半径（0.5 = 内切圆）
+
+float2 ReadClamped(int2 c)
+{
+    c = clamp(c, int2(0, 0), int2(_Res - 1, _Res - 1));
+    return StateIn[c];
+}
+
+[numthreads(8, 8, 1)]
+void Simulate (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Res || id.y >= (uint)_Res) return;
+    int2 c = int2(id.xy);
+
+    float2 s = StateIn[c];
+    float h = s.x;
+    float v = s.y;
+
+    float hl = ReadClamped(c + int2(-1, 0)).x;  
+    float hr = ReadClamped(c + int2( 1, 0)).x;
+    float hu = ReadClamped(c + int2( 0, 1)).x;
+    float hd = ReadClamped(c + int2( 0,-1)).x;
+    float lap = (hl + hr + hu + hd) - 4.0 * h;
+
+    float spd = clamp(_Propagation, 0.0, 0.49);  
+    v += lap * spd;
+    v *= (1.0 - _Friction);
+    h += v;
+    h *= _Damping;
+
+    h = clamp(h, -4.0, 4.0);                     
+    v = clamp(v, -8.0, 8.0);
+
+    if (_UseMask > 0.5)
+    {
+        float2 uv = (float2(c) + 0.5) / _Res;
+        if (distance(uv, float2(0.5, 0.5)) > _MaskRadius) { h = 0; v = 0; }
+    }
+
+    StateOut[c] = float2(h, v);
+}
+
+float2 _BrushUV;
+float  _BrushRadius, _BrushStrength, _BrushAspect;
+
+[numthreads(8, 8, 1)]
+void Splat (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_Res || id.y >= (uint)_Res) return;
+    int2 c = int2(id.xy);
+
+    float2 uv = (float2(c) + 0.5) / _Res;
+    float2 d  = uv - _BrushUV;
+    d.x *= _BrushAspect;                          
+    float g = exp(-dot(d, d) / max(_BrushRadius * _BrushRadius, 1e-6)) * _BrushStrength;
+
+    float2 s = StateIn[c];
+    s.x += g;                                    
+    StateIn[c] = s;
+}
