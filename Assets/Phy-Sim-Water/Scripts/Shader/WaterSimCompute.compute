@@ -1,6 +1,6 @@
 // WaterSimCompute.compute
-// 适用于PC的GPU稳定归一化浅水（波浪）求解器。
-// 状态纹理：RG浮点数 -> R = 高度，G = 速度。
+// Stable normalized shallow-water (ripple) solver on the GPU for PC.
+// State texture: RG float -> R = height, G = velocity.
 #pragma kernel Simulate
 #pragma kernel Splat
 
@@ -8,11 +8,11 @@ RWTexture2D<float2> StateIn;
 RWTexture2D<float2> StateOut;
 
 int   _Res;
-float _Propagation; // 0.0.49（稳定波速；>0.49 发散 → 固定）
+float _Propagation;   // 0..0.49  (stable wave speed; >0.49 diverges -> clamped)
 float _Friction;      // 0..~0.05
 float _Damping;       // ~0.995..1.0
-float _UseMask;        // 循环 pool on/off
-float _MaskRadius;     // uv-space 半径（0.5 = 内切圆）
+float _UseMask;       // circular pool on/off
+float _MaskRadius;    // uv-space radius (0.5 = inscribed circle)
 
 float2 ReadClamped(int2 c)
 {
@@ -30,19 +30,19 @@ void Simulate (uint3 id : SV_DispatchThreadID)
     float h = s.x;
     float v = s.y;
 
-    float hl = ReadClamped(c + int2(-1, 0)).x;  
+    float hl = ReadClamped(c + int2(-1, 0)).x;  // clamp edges = reflective walls
     float hr = ReadClamped(c + int2( 1, 0)).x;
     float hu = ReadClamped(c + int2( 0, 1)).x;
     float hd = ReadClamped(c + int2( 0,-1)).x;
     float lap = (hl + hr + hu + hd) - 4.0 * h;
 
-    float spd = clamp(_Propagation, 0.0, 0.49);  
+    float spd = clamp(_Propagation, 0.0, 0.49);  // CFL-safe; prevents mesh-breaking blow-ups
     v += lap * spd;
     v *= (1.0 - _Friction);
     h += v;
     h *= _Damping;
 
-    h = clamp(h, -4.0, 4.0);                     
+    h = clamp(h, -4.0, 4.0);                     // hard clamp safety net
     v = clamp(v, -8.0, 8.0);
 
     if (_UseMask > 0.5)
@@ -65,10 +65,10 @@ void Splat (uint3 id : SV_DispatchThreadID)
 
     float2 uv = (float2(c) + 0.5) / _Res;
     float2 d  = uv - _BrushUV;
-    d.x *= _BrushAspect;                          
+    d.x *= _BrushAspect;                          // keep ripple round on non-square pools
     float g = exp(-dot(d, d) / max(_BrushRadius * _BrushRadius, 1e-6)) * _BrushStrength;
 
     float2 s = StateIn[c];
-    s.x += g;                                    
+    s.x += g;                                     // add to height (in place)
     StateIn[c] = s;
 }

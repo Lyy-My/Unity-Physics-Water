@@ -3,22 +3,26 @@ using UnityEngine;
 using UnityEngine.InputSystem;
 
 /// <summary>
-/// GPU浅水模拟驱动程序。  
-/// 将此文件放在资源池根目录下。WaterSurfaceURP（可视化）和FloatingObjectURP会从中读取数据。
+/// GPU shallow-water simulation driver (PC / URP). Runs a compute shader ping-pong.
 /// </summary>
 [DisallowMultipleComponent]
 public class WaterSimulationURP : MonoBehaviour
 {
     [Header("Compute")]
-    public ComputeShader compute;          // 分配 WaterSimCompute
-    public int resolution = 512;           // 网格（PC可支持512）
+    public ComputeShader compute;          // assign WaterSimCompute
+    public int resolution = 512;
 
     [Header("Size (world meters)")]
     public Vector2 size = new Vector2(6f, 6f);
-    public bool    circularPool = false;          // OFF = 整个矩形的波纹（修复“仅中心”问题）
+    public bool    circularPool = false;
+
+    [Tooltip("The object that actually holds the water mesh (the Surface). " +
+             "World<->UV uses THIS transform so clicks/footprints line up with the visible mesh. " +
+             "Leave empty to use this object's transform.")]
+    public Transform surfaceTransform;
 
     [Header("Simulation")]
-    [Range(0.05f, 0.49f)] public float propagation = 0.45f; // 波速（限制稳定）
+    [Range(0.05f, 0.49f)] public float propagation = 0.45f;
     [Range(0f, 0.05f)]    public float friction    = 0.004f;
     [Range(0.99f, 1f)]    public float damping      = 0.999f;
     [Range(1, 8)]         public int   substeps     = 4;
@@ -45,6 +49,7 @@ public class WaterSimulationURP : MonoBehaviour
 
     public RenderTexture HeightTexture => _a;
     public Vector2 Size => size;
+    Transform Frame => surfaceTransform ? surfaceTransform : transform;
 
     void OnEnable()
     {
@@ -69,7 +74,6 @@ public class WaterSimulationURP : MonoBehaviour
             filterMode = FilterMode.Bilinear
         };
         rt.Create();
-
         var prev = RenderTexture.active;
         RenderTexture.active = rt;
         GL.Clear(false, true, Color.clear);
@@ -77,9 +81,7 @@ public class WaterSimulationURP : MonoBehaviour
         return rt;
     }
 
-    void Swap() {
-        (_b, _a) = (_a, _b);
-    }
+    void Swap() { var t = _a; _a = _b; _b = t; }
 
     void Update()
     {
@@ -92,7 +94,6 @@ public class WaterSimulationURP : MonoBehaviour
         int groups = Mathf.CeilToInt(resolution / 8f);
         float aspect = Mathf.Approximately(size.y, 0f) ? 1f : size.x / size.y;
 
-        // 作用于 _a 上
         compute.SetInt("_Res", resolution);
         compute.SetFloat("_BrushAspect", aspect);
         foreach (var s in _queue)
@@ -122,13 +123,16 @@ public class WaterSimulationURP : MonoBehaviour
     public void AddRipple(Vector2 uv, float radius, float strength)
         => _queue.Add(new Splat { uv = uv, radius = radius, strength = strength });
 
-    /// <summary>世界坐标系 -> sim uv。以该变换为中心的平面，足迹 = 尺寸（X，Z）。</summary>
+    /// <summary>World -> sim uv using the SURFACE transform (handles position/rotation/scale).</summary>
     public bool WorldToUV(Vector3 world, out Vector2 uv)
     {
-        Vector3 local = world - transform.position;
+        Vector3 local = Frame.InverseTransformPoint(world);   // mesh-local space
         uv = new Vector2(local.x / size.x + 0.5f, local.z / size.y + 0.5f);
         return uv.x >= 0f && uv.x <= 1f && uv.y >= 0f && uv.y <= 1f;
     }
+
+    /// <summary>Calm-water surface world Y at a position (ignores ripples).</summary>
+    public float SurfaceY => Frame.position.y;
 
     void QueueAmbient()
     {
@@ -137,7 +141,7 @@ public class WaterSimulationURP : MonoBehaviour
         while (_ambientAcc >= 1f)
         {
             _ambientAcc -= 1f;
-            Vector2 uv = new(Random.value, Random.value);
+            Vector2 uv = new Vector2(Random.value, Random.value);
             if (circularPool && Vector2.Distance(uv, new Vector2(0.5f, 0.5f)) > 0.5f) continue;
             AddRipple(uv, brushRadius * Random.Range(0.3f, 0.8f),
                       ambientStrength * Random.Range(-1f, 1f));
@@ -149,7 +153,8 @@ public class WaterSimulationURP : MonoBehaviour
         var mouse = Mouse.current;
         if (mouse == null || !mouse.leftButton.isPressed || interactionCamera == null) return;
 
-        var plane = new Plane(Vector3.up, transform.position);
+        // raycast against the actual surface plane (its position + up vector)
+        var plane = new Plane(Frame.up, Frame.position);
         Ray ray = interactionCamera.ScreenPointToRay(mouse.position.ReadValue());
         if (plane.Raycast(ray, out float d))
         {
